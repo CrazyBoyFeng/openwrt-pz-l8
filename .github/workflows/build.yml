@@ -1,0 +1,532 @@
+# GitHub Actions workflow for building OpenWrt firmware for CMCC PZ-L8
+# Builds both AP and Router modes in parallel, releases together
+# Uses main branch with PR #21495 merged
+
+name: Build OpenWrt for CMCC PZ-L8
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (leave empty for no release)'
+        required: false
+        default: ''
+
+env:
+  TARGET: qualcommax
+  SUBTARGET: ipq50xx
+  DEVICE: cmcc_pz-l8
+
+jobs:
+  build:
+    name: Build ${{ matrix.mode }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [AP, Router]
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # This action removes: android, dotnet, haskell, tool-cache, large-packages
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Show disk space
+        run: df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git \
+            libncurses-dev libssl-dev python3-distutils \
+            python3-setuptools python3-dev rsync swig unzip \
+            zlib1g-dev file wget curl jq device-tree-compiler \
+            ccache libelf-dev libdw-dev libiberty-dev
+
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: main
+          path: openwrt
+          fetch-depth: 0
+
+      - name: Merge PR #21495 (AP)
+        if: matrix.mode == 'AP'
+        working-directory: openwrt
+        run: |
+          git config user.email "builder@github.com"
+          git config user.name "GitHub Actions"
+
+          # PR #21495: PZ-L8 support + ath11k-smallbuffers
+          git fetch origin pull/21495/head:pr-21495
+          git merge pr-21495 --no-edit
+
+          # Revert ipq-wifi/Makefile changes - we handle BDF files manually
+          git checkout HEAD -- package/firmware/ipq-wifi/Makefile || true
+
+          echo "=== Merge status ==="
+          git status --short
+
+      - name: Merge PR #21495 + #21496 (Router)
+        if: matrix.mode == 'Router'
+        working-directory: openwrt
+        run: |
+          git config user.email "builder@github.com"
+          git config user.name "GitHub Actions"
+
+          # PR #21495: PZ-L8 support + ath11k-smallbuffers
+          git fetch origin pull/21495/head:pr-21495
+          git merge pr-21495 --no-edit
+
+          # PR #21496: PHY-to-PHY 2Gbps support
+          git fetch origin pull/21496/head:pr-21496
+          git merge pr-21496 --no-edit
+
+          # Revert ipq-wifi/Makefile changes - we handle BDF files manually
+          git checkout HEAD -- package/firmware/ipq-wifi/Makefile || true
+
+          echo "=== Merge status ==="
+          git status --short
+
+      - name: Download BDF files for PZ-L8 WiFi
+        working-directory: openwrt
+        run: |
+          mkdir -p files/lib/firmware/ath11k/IPQ5018/hw1.0
+          mkdir -p files/lib/firmware/ath11k/QCN6122/hw1.0
+
+          # IPQ5000 (2.4GHz SoC built-in WiFi)
+          curl -L -o files/lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin \
+            "https://github.com/openwrt/firmware_qca-wireless/raw/f7ad5fee1924efdb5d8b2d1bf95bd3867d22e701/board-cmcc_pz-l8.ipq5018"
+
+          # QCN6102 (5GHz external WiFi module)
+          curl -L -o files/lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin \
+            "https://github.com/openwrt/firmware_qca-wireless/raw/f7ad5fee1924efdb5d8b2d1bf95bd3867d22e701/board-cmcc_pz-l8.qcn6122"
+
+          echo "=== Downloaded BDF files ==="
+          ls -la files/lib/firmware/ath11k/IPQ5018/hw1.0/
+          ls -la files/lib/firmware/ath11k/QCN6122/hw1.0/
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # ccache is mode-specific because .config differs
+          key: ccache-${{ env.TARGET }}-${{ matrix.mode }}-v9-${{ hashFiles('openwrt/feeds.conf.default') }}
+          restore-keys: |
+            ccache-${{ env.TARGET }}-${{ matrix.mode }}-v9-
+            ccache-${{ env.TARGET }}-v9-
+
+      - name: Cache toolchain (shared)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/staging_dir
+          # toolchain is shared between AP and Router (same target)
+          key: toolchain-${{ env.TARGET }}-v9-${{ hashFiles('openwrt/include/version.mk') }}
+          restore-keys: toolchain-${{ env.TARGET }}-v9-
+
+      - name: Configure ccache
+        run: |
+          ccache --set-config=cache_dir=~/.ccache
+          ccache --set-config=max_size=10G
+          ccache --set-config=compression=true
+          ccache -z
+
+      - name: Update feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Create custom files for AP mode
+        if: matrix.mode == 'AP'
+        working-directory: openwrt
+        run: |
+          mkdir -p files/etc/uci-defaults
+          mkdir -p files/etc/config
+
+          cat > files/etc/config/network << 'EOF'
+          config interface 'loopback'
+              option device 'lo'
+              option proto 'static'
+              option ipaddr '127.0.0.1'
+              option netmask '255.0.0.0'
+
+          config device
+              option name 'br-lan'
+              option type 'bridge'
+              list ports 'lan1'
+              list ports 'lan2'
+              list ports 'lan3'
+              list ports 'wan'
+
+          config interface 'lan'
+              option device 'br-lan'
+              option proto 'dhcp'
+
+          config interface 'lan_static'
+              option device 'br-lan'
+              option proto 'static'
+              option ipaddr '192.168.10.1'
+              option netmask '255.255.255.0'
+          EOF
+
+          cat > files/etc/uci-defaults/99-ap-mode-network << 'UCI'
+          #!/bin/sh
+          uci set system.@system[0].hostname='OpenWrt-AP'
+          uci set network.lan='interface'
+          uci set network.lan.device='br-lan'
+          uci set network.lan.proto='dhcp'
+          uci set network.lan_static='interface'
+          uci set network.lan_static.device='br-lan'
+          uci set network.lan_static.proto='static'
+          uci set network.lan_static.ipaddr='192.168.10.1'
+          uci set network.lan_static.netmask='255.255.255.0'
+          uci commit network
+          exit 0
+          UCI
+          chmod +x files/etc/uci-defaults/99-ap-mode-network
+
+          mkdir -p files/etc/sysctl.d
+          cat > files/etc/sysctl.d/99-ipv6-ap.conf << 'EOF'
+          net.ipv6.conf.br-lan.accept_ra = 2
+          net.ipv6.conf.br-lan.forwarding = 0
+          net.ipv6.conf.default.accept_ra = 2
+          net.ipv6.conf.default.forwarding = 0
+          EOF
+
+      - name: Generate configuration (AP)
+        if: matrix.mode == 'AP'
+        working-directory: openwrt
+        run: |
+          cat > .config << 'EOF'
+          # Target
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq50xx=y
+          CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_cmcc_pz-l8=y
+
+          # Build
+          CONFIG_DEVEL=y
+          CONFIG_CCACHE=y
+          CONFIG_USE_CCACHE=y
+          CONFIG_ALL_KMODS=y
+          CONFIG_ALL_NONSHARED=y
+
+          # Image
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_INCLUDE_CONFIG=y
+
+          # Kernel
+          CONFIG_KERNEL_CRASHLOG=y
+          CONFIG_KERNEL_SWAP=y
+          CONFIG_KERNEL_DEBUG_FS=y
+
+          # Disable router components
+          CONFIG_PACKAGE_dnsmasq=m
+          CONFIG_PACKAGE_odhcpd=m
+          CONFIG_PACKAGE_odhcpd-ipv6only=m
+          CONFIG_PACKAGE_odhcp6c=m
+          CONFIG_PACKAGE_firewall4=m
+          CONFIG_PACKAGE_nftables=m
+          CONFIG_PACKAGE_kmod-nft-offload=m
+          CONFIG_PACKAGE_ppp=m
+          CONFIG_PACKAGE_ppp-mod-pppoe=m
+          CONFIG_PACKAGE_luci-app-firewall=m
+          CONFIG_PACKAGE_luci-proto-ipv6=m
+          CONFIG_PACKAGE_luci-proto-ppp=m
+
+          # mbedtls
+          CONFIG_PACKAGE_libustream-mbedtls=y
+
+          # WiFi
+          CONFIG_PACKAGE_kmod-ath11k-ahb=y
+          CONFIG_PACKAGE_kmod-ath11k-smallbuffers=y
+          CONFIG_PACKAGE_ath11k-firmware-ipq5018-qcn6122=y
+          CONFIG_PACKAGE_wpad-mesh-mbedtls=y
+
+          # Mesh
+          CONFIG_PACKAGE_usteer=y
+          CONFIG_PACKAGE_luci-app-usteer=y
+
+          # LuCI minimal
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-package-manager=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_luci=m
+
+          # Core
+          CONFIG_PACKAGE_apk-mbedtls=y
+          CONFIG_PACKAGE_base-files=y
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_fstools=y
+          CONFIG_PACKAGE_kmod-gpio-button-hotplug=y
+          CONFIG_PACKAGE_kmod-leds-gpio=y
+          CONFIG_PACKAGE_kmod-qca-nss-dp=y
+          CONFIG_PACKAGE_logd=y
+          CONFIG_PACKAGE_mtd=y
+          CONFIG_PACKAGE_netifd=y
+          CONFIG_PACKAGE_procd-ujail=y
+          CONFIG_PACKAGE_uboot-envtools=y
+          CONFIG_PACKAGE_uci=y
+          CONFIG_PACKAGE_urandom-seed=y
+          CONFIG_PACKAGE_urngd=y
+
+          # ZRAM
+          CONFIG_PACKAGE_kmod-zram=y
+          CONFIG_KERNEL_ZRAM_BACKEND_LZO=y
+          CONFIG_KERNEL_ZRAM_BACKEND_ZSTD=y
+          CONFIG_KERNEL_ZRAM_DEF_COMP_LZORLE=y
+          CONFIG_PACKAGE_zram-swap=y
+
+          CONFIG_PACKAGE_iw=y
+          CONFIG_PACKAGE_iwinfo=y
+          EOF
+
+          make defconfig
+          make defconfig
+
+      - name: Generate configuration (Router)
+        if: matrix.mode == 'Router'
+        working-directory: openwrt
+        run: |
+          cat > .config << 'EOF'
+          # Target
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq50xx=y
+          CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_cmcc_pz-l8=y
+
+          # Build
+          CONFIG_DEVEL=y
+          CONFIG_CCACHE=y
+          CONFIG_USE_CCACHE=y
+          CONFIG_ALL_KMODS=y
+          CONFIG_ALL_NONSHARED=y
+
+          # Image
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_INCLUDE_CONFIG=y
+
+          # Kernel
+          CONFIG_KERNEL_CRASHLOG=y
+          CONFIG_KERNEL_SWAP=y
+          CONFIG_KERNEL_DEBUG_FS=y
+
+          # mbedtls
+          CONFIG_PACKAGE_libustream-mbedtls=y
+
+          # WiFi
+          CONFIG_PACKAGE_kmod-ath11k-ahb=y
+          CONFIG_PACKAGE_kmod-ath11k-smallbuffers=y
+          CONFIG_PACKAGE_ath11k-firmware-ipq5018-qcn6122=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+
+          # LuCI
+          CONFIG_PACKAGE_luci=y
+
+          # Router packages
+          CONFIG_PACKAGE_apk-mbedtls=y
+          CONFIG_PACKAGE_base-files=y
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_dnsmasq=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_firewall4=y
+          CONFIG_PACKAGE_fstools=y
+          CONFIG_PACKAGE_kmod-gpio-button-hotplug=y
+          CONFIG_PACKAGE_kmod-leds-gpio=y
+          CONFIG_PACKAGE_kmod-nft-offload=y
+          CONFIG_PACKAGE_kmod-qca-nss-dp=y
+          CONFIG_PACKAGE_logd=y
+          CONFIG_PACKAGE_mtd=y
+          CONFIG_PACKAGE_netifd=y
+          CONFIG_PACKAGE_nftables=y
+          CONFIG_PACKAGE_odhcp6c=y
+          CONFIG_PACKAGE_odhcpd-ipv6only=y
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_procd-ujail=y
+          CONFIG_PACKAGE_uboot-envtools=y
+          CONFIG_PACKAGE_uci=y
+          CONFIG_PACKAGE_uclient-fetch=y
+          CONFIG_PACKAGE_urandom-seed=y
+          CONFIG_PACKAGE_urngd=y
+
+          # ZRAM
+          CONFIG_PACKAGE_kmod-zram=y
+          CONFIG_KERNEL_ZRAM_BACKEND_LZO=y
+          CONFIG_KERNEL_ZRAM_DEF_COMP_ZSTD=y
+          CONFIG_KERNEL_ZRAM_DEF_COMP_LZORLE=y
+          CONFIG_PACKAGE_zram-swap=y
+
+          CONFIG_PACKAGE_iw=y
+          CONFIG_PACKAGE_iwinfo=y
+          EOF
+
+          make defconfig
+          make defconfig
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          for i in 1 2 3; do
+            echo "Download attempt $i/3..."
+            if make download -j$(nproc) V=s; then
+              break
+            fi
+            [ $i -eq 3 ] && exit 1
+            sleep 30
+          done
+
+      - name: Build
+        working-directory: openwrt
+        run: make -j$(nproc) V=w || make -j1 V=s
+
+      - name: Show ccache stats
+        run: ccache -s
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          find openwrt/bin/targets -name "*.bin" -exec cp {} artifacts/ \;
+          find openwrt/bin/targets -name "*.img" -exec cp {} artifacts/ \;
+          cd artifacts && sha256sum * > sha256sums.txt
+
+          if [ "${{ matrix.mode }}" = "AP" ]; then
+            PATCHES="PR #21495"
+          else
+            PATCHES="PR #21495 + PR #21496 (PHY-to-PHY 2Gbps)"
+          fi
+
+          cat > BUILD_INFO.txt << EOF
+          Mode: ${{ matrix.mode }}
+          Build: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Target: ${{ env.TARGET }}/${{ env.SUBTARGET }}
+          Device: ${{ env.DEVICE }}
+          Branch: main
+          Patches: ${PATCHES}
+          EOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ matrix.mode }}
+          path: artifacts/
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: inputs.release_tag != ''
+
+    steps:
+      - name: Download AP artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: openwrt-AP
+          path: artifacts/ap/
+
+      - name: Download Router artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: openwrt-Router
+          path: artifacts/router/
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+
+          # Copy and rename AP files
+          for f in artifacts/ap/*-factory.bin; do
+            [ -f "$f" ] && cp "$f" "release/openwrt-pz-l8-factory-ap.bin"
+          done
+          for f in artifacts/ap/*-sysupgrade.bin; do
+            [ -f "$f" ] && cp "$f" "release/openwrt-pz-l8-sysupgrade-ap.bin"
+          done
+
+          # Copy and rename Router files
+          for f in artifacts/router/*-factory.bin; do
+            [ -f "$f" ] && cp "$f" "release/openwrt-pz-l8-factory-router.bin"
+          done
+          for f in artifacts/router/*-sysupgrade.bin; do
+            [ -f "$f" ] && cp "$f" "release/openwrt-pz-l8-sysupgrade-router.bin"
+          done
+
+          # Generate sha256sums
+          cd release
+          sha256sum * > sha256sums
+
+          # Create release notes
+          cat > RELEASE_NOTES.md << 'EOF'
+          ## OpenWrt Firmware for CMCC PZ-L8
+
+          **Branch:** main
+
+          ### Patches
+          - AP: PR #21495 (PZ-L8 support + ath11k-smallbuffers)
+          - Router: PR #21495 + PR #21496 (PHY-to-PHY 2Gbps)
+
+          ### Files
+
+          | File | Mode | Description |
+          |------|------|-------------|
+          | `openwrt-pz-l8-factory-ap.bin` | AP | 从原厂固件刷入 |
+          | `openwrt-pz-l8-sysupgrade-ap.bin` | AP | OpenWrt 系统内升级 |
+          | `openwrt-pz-l8-factory-router.bin` | Router | 从原厂固件刷入 |
+          | `openwrt-pz-l8-sysupgrade-router.bin` | Router | OpenWrt 系统内升级 |
+
+          ### AP 模式
+          - 所有端口桥接 (lan1, lan2, lan3, wan)
+          - DHCP 客户端，fallback 192.168.10.1
+          - 802.11s mesh 支持 + usteer
+          - 无防火墙，无 DHCP 服务器
+
+          ### Router 模式
+          - 完整路由功能
+          - WAN: wan 口 (DHCP 或 PPPoE)
+          - LAN: lan1, lan2, lan3 桥接
+          - 防火墙、NAT、IPv6 支持
+          - PHY-to-PHY 2Gbps 硬件加速
+
+          ### 共同特性
+          - WiFi: 2.4GHz (IPQ5000) + 5GHz (QCN6102)
+          - 驱动: ath11k-smallbuffers (256MB RAM 优化)
+          - ZRAM: lzo-rle (默认) / zstd (可选)
+
+          ### ZRAM 压缩算法
+          - 支持: lzo, lzo-rle, zstd
+          - 默认: lzo-rle (低 CPU 占用)
+          - 切换: `echo zstd > /sys/block/zram0/comp_algorithm`
+          - UCI: `option zram_comp_algo 'zstd'`
+
+          ### 安装方法
+          1. 通过原厂固件 Web 界面刷入 factory.bin
+          2. 或在 OpenWrt 中使用 sysupgrade 升级
+          EOF
+
+          ls -la
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: release/*
+          body_path: release/RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

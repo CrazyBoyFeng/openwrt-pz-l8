@@ -486,38 +486,38 @@ jobs:
 
           | File | Mode | Description |
           |------|------|-------------|
-          | `openwrt-pz-l8-factory-ap.bin` | AP | 从原厂固件刷入 |
-          | `openwrt-pz-l8-sysupgrade-ap.bin` | AP | OpenWrt 系统内升级 |
-          | `openwrt-pz-l8-factory-router.bin` | Router | 从原厂固件刷入 |
-          | `openwrt-pz-l8-sysupgrade-router.bin` | Router | OpenWrt 系统内升级 |
+          | `openwrt-pz-l8-factory-ap.bin` | AP | Flash from stock firmware |
+          | `openwrt-pz-l8-sysupgrade-ap.bin` | AP | Upgrade from existing OpenWrt |
+          | `openwrt-pz-l8-factory-router.bin` | Router | Flash from stock firmware |
+          | `openwrt-pz-l8-sysupgrade-router.bin` | Router | Upgrade from existing OpenWrt |
 
-          ### AP 模式
-          - 所有端口桥接 (lan1, lan2, lan3, wan)
-          - DHCP 客户端，fallback 192.168.10.1
-          - 802.11s mesh 支持 + usteer
-          - 无防火墙，无 DHCP 服务器
+          ### AP Mode
+          - All ports bridged (lan1, lan2, lan3, wan)
+          - DHCP client with 192.168.10.1 fallback
+          - 802.11s mesh support + usteer
+          - No firewall, no DHCP server
 
-          ### Router 模式
-          - 完整路由功能
-          - WAN: wan 口 (DHCP 或 PPPoE)
-          - LAN: lan1, lan2, lan3 桥接
-          - 防火墙、NAT、IPv6 支持
-          - PHY-to-PHY 2Gbps 硬件加速
+          ### Router Mode
+          - Full router features
+          - WAN: wan port (DHCP or PPPoE)
+          - LAN: lan1, lan2, lan3 bridged
+          - Firewall, NAT, IPv6 support
+          - PHY-to-PHY 2Gbps hardware offload
 
-          ### 共同特性
+          ### Common Features
           - WiFi: 2.4GHz (IPQ5000) + 5GHz (QCN6102)
-          - 驱动: ath11k-smallbuffers (256MB RAM 优化)
-          - ZRAM: lzo-rle (默认) / zstd (可选)
+          - Driver: ath11k-smallbuffers (256MB RAM optimized)
+          - ZRAM: lzo-rle (default) / zstd (optional)
 
-          ### ZRAM 压缩算法
-          - 支持: lzo, lzo-rle, zstd
-          - 默认: lzo-rle (低 CPU 占用)
-          - 切换: `echo zstd > /sys/block/zram0/comp_algorithm`
+          ### ZRAM Compression
+          - Supported: lzo, lzo-rle, zstd
+          - Default: lzo-rle (low CPU usage)
+          - Switch: `echo zstd > /sys/block/zram0/comp_algorithm`
           - UCI: `option zram_comp_algo 'zstd'`
 
-          ### 安装方法
-          1. 通过原厂固件 Web 界面刷入 factory.bin
-          2. 或在 OpenWrt 中使用 sysupgrade 升级
+          ### Installation
+          1. Flash factory.bin via stock firmware web UI
+          2. Or use sysupgrade to upgrade from existing OpenWrt
           EOF
 
           ls -la

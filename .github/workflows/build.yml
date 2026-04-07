@@ -402,31 +402,23 @@ jobs:
 
       - name: Prepare artifacts
         run: |
-          echo "=== All build output files ==="
-          find openwrt/bin/targets/qualcommax/ipq50xx/ -type f | sort
-
-          echo "=== Checking for factory.ubi ==="
-          if ls openwrt/bin/targets/qualcommax/ipq50xx/*factory*.* 2>/dev/null; then
-            echo "factory.ubi found!"
-          else
-            echo "WARNING: No factory image found in build output"
-          fi
-
-          echo "=== Checking for sysupgrade.bin ==="
-          if ls openwrt/bin/targets/qualcommax/ipq50xx/*sysupgrade*.* 2>/dev/null; then
-            echo "sysupgrade.bin found!"
-          else
-            echo "WARNING: No sysupgrade image found in build output"
-          fi
+          echo "=== Device build output ==="
+          find openwrt/bin/targets/qualcommax/ipq50xx/ -maxdepth 1 -type f | sort
 
           mkdir -p artifacts
-          find openwrt/bin/targets -name "*.bin" -exec cp {} artifacts/ \;
-          find openwrt/bin/targets -name "*.img" -exec cp {} artifacts/ \;
-          find openwrt/bin/targets -name "*.ubi" -exec cp {} artifacts/ \;
-          cd artifacts && sha256sum * > sha256sums.txt
 
+          echo "=== Copying firmware images ==="
+          cp -v openwrt/bin/targets/qualcommax/ipq50xx/*factory*.ubi artifacts/ || echo "No factory.ubi found"
+          cp -v openwrt/bin/targets/qualcommax/ipq50xx/*sysupgrade*.bin artifacts/ || echo "No sysupgrade.bin found"
+          cp -v openwrt/bin/targets/qualcommax/ipq50xx/sha256sums artifacts/ || true
+
+          cd artifacts
           echo "=== Artifacts to upload ==="
-          ls -la artifacts/
+          ls -lh
+          echo "=== Generating sha256sums ==="
+          sha256sum * > sha256sums.txt 2>/dev/null || sha256sum *.bin *.ubi > sha256sums.txt 2>/dev/null || true
+          echo "=== Final artifact contents ==="
+          ls -lh
 
           if [ "${{ matrix.mode }}" = "AP" ]; then
             PATCHES="PR #21495"

@@ -80,11 +80,11 @@ Download from [Releases](https://github.com/CrazyBoyFeng/openwrt-pz-l8/releases)
 
 ## Installation
 
-> **Note**: This repository does not provide factory images. You must first flash the official OpenWrt factory firmware following the guide at [PR #20681](https://github.com/openwrt/openwrt/pull/20681), then upgrade to this repository's sysupgrade image.
+> **Note**: If your device is still running the stock firmware, you must flash the `factory.ubi` image first. Please follow the installation guide at [PR #20681](https://github.com/openwrt/openwrt/pull/20681) for the flashing method. Once OpenWrt is installed, you can use the `sysupgrade.bin` image for subsequent upgrades.
 
 ### Prerequisites
 
-- Device must already be running OpenWrt
+- Device must already be running OpenWrt (if upgrading with sysupgrade.bin)
 - Access to LuCI web interface or SSH
 
 ### Via LuCI Web Interface

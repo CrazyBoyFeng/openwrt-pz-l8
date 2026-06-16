@@ -480,14 +480,18 @@ build_variants() {
 
         # 4. Build (skip toolchain/compile if precompiled toolchain is installed)
         BUILD_V_START=$(date +%s)
-        if [ -d "staging_dir/toolchain-aarch64_cortex-a53_gcc-14.3.0_musl" ]; then
-            echo "=== Using precompiled toolchain, skipping toolchain/compile ==="
-            make toolchain/kernels-prepare -j"$JOBS" V=w || true
+        PRECOMPILED_TC=$(find staging_dir -maxdepth 1 -type d -name 'toolchain-aarch64_*' 2>/dev/null | head -1)
+        if [ -n "$PRECOMPILED_TC" ]; then
+            echo "=== Using precompiled toolchain ($(basename "$PRECOMPILED_TC")), skipping toolchain/compile ==="
+            # Build host tools (m4, bison, flex, etc.) required by kernel config
+            make tools/compile -j"$JOBS" V=w
             make target/compile -j"$JOBS" V=w || make target/compile -j1 V=w || make target/compile -j1 V=s
+            # Pre-create buildinfo stubs (base-files needs them, normally from make prepare)
+            mkdir -p bin/targets/${TARGET}/${SUBTARGET}
+            touch bin/targets/${TARGET}/${SUBTARGET}/{config,feeds,version}.buildinfo
             make package/compile -j"$JOBS" V=w || make package/compile -j1 V=w || make package/compile -j1 V=s
-            make package/install -j"$JOBS" V=w || make package/install -j1 V=w || make package/install -j1 V=s
-            make target/install -j"$JOBS" V=w || make target/install -j1 V=w || make target/install -j1 V=s
-            make package_index -j"$JOBS" V=w || true
+            make package/install -j"$JOBS" V=w
+            make target/install -j"$JOBS" V=w
         else
             make -j"$JOBS" V=w || make -j1 V=w || make -j1 V=s
         fi

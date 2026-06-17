@@ -1,9 +1,15 @@
 # GitHub Actions workflow for building OpenWrt firmware for CMCC PZ-L8
 #
 # Jobs:
-#   check   - Gate: deduplicate push vs PR, skip drafts, check artifact cache
-#   build   - Run build only when cache misses (skip on hit)
+#   check   - Gate: deduplicate push/PR, search existing artifact (cross-branch/PR)
+#   build   - Run build only when no existing artifact found
 #   release - Create GitHub release with tagged artifacts (manual only)
+#
+# Artifact-based caching:
+#   - Build artifacts are uploaded with name "firmware-<hashFiles key>"
+#   - Check job searches artifacts by name via GitHub API (cross scope)
+#   - This allows PR builds to serve main and vice versa
+#   - ccache and dl caches still use actions/cache (build acceleration only)
 #
 # Trigger deduplication:
 #   - push: skipped if an open PR exists for the branch (PR CI will cover it)
@@ -41,7 +47,6 @@ jobs:
     name: Check
     runs-on: ubuntu-22.04
     outputs:
-      cache-hit: ${{ steps.artifact-cache.outputs.cache-hit }}
       build-key: ${{ steps.sig.outputs.key }}
       skip-build: ${{ steps.decide.outputs.skip-build }}
       skip-all: ${{ steps.gate.outputs.skip }}
@@ -81,37 +86,69 @@ jobs:
           INPUT_SIG="${{ hashFiles('variants/**', 'patches/**', 'scripts/**', 'build.sh') }}"
           echo "key=$INPUT_SIG" >> "$GITHUB_OUTPUT"
 
-      - name: Try to restore cached artifacts
+      - name: Search existing artifact
         if: steps.gate.outputs.skip != 'true'
-        id: artifact-cache
-        uses: actions/cache/restore@v4
+        id: search
+        run: |
+          KEY="${{ steps.sig.outputs.key }}"
+          ARTIFACT_NAME="firmware-$KEY"
+          FOUND=false
+          ARTIFACT_ID=""
+
+          RESPONSE=$(curl -sf -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/actions/artifacts?per_page=5&name=$ARTIFACT_NAME")
+
+          # Find first non-expired artifact
+          ARTIFACT_ID=$(echo "$RESPONSE" | jq -r '(.artifacts // [] | map(select(.expired == false)) | first | .id) // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            FOUND=true
+            CREATED=$(echo "$RESPONSE" | jq -r '(.artifacts // [] | map(select(.expired == false)) | first | .created_at) // empty')
+            echo "::notice::Found existing artifact $ARTIFACT_NAME (ID: $ARTIFACT_ID, created: $CREATED)"
+          fi
+          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
+          echo "artifact-id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download and re-upload artifact
+        if: steps.search.outputs.found == 'true'
+        run: |
+          ARTIFACT_ID="${{ steps.search.outputs.artifact-id }}"
+          ARTIFACT_NAME="firmware-${{ steps.sig.outputs.key }}"
+
+          echo "Downloading artifact $ARTIFACT_ID..."
+          curl -sfL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
+            -o artifacts.zip
+          unzip -q artifacts.zip -d artifacts/
+          rm artifacts.zip
+
+      - name: Upload artifact (cache hit)
+        if: steps.search.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
         with:
+          name: firmware-${{ steps.sig.outputs.key }}
           path: artifacts/
-          key: firmware-${{ steps.sig.outputs.key }}
 
       - name: Decide whether to skip build
         if: steps.gate.outputs.skip != 'true'
         id: decide
         run: |
-          if [ "${{ steps.artifact-cache.outputs.cache-hit }}" = 'true' ]; then
+          if [ "${{ steps.search.outputs.found }}" = 'true' ]; then
             echo "skip-build=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Cache hit (firmware-${{ steps.sig.outputs.key }}). Build will be skipped."
+            echo "::notice::Artifact hit (firmware-${{ steps.sig.outputs.key }}). Build will be skipped."
           else
             echo "skip-build=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload cached artifacts (cache hit only)
-        if: steps.gate.outputs.skip != 'true' && steps.artifact-cache.outputs.cache-hit == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-firmware
-          path: artifacts/
-          retention-days: 1
-
       - name: Check summary
         if: steps.gate.outputs.skip != 'true'
         run: |
-          echo "**Cache key**: \`firmware-${{ steps.sig.outputs.key }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Artifact key**: \`firmware-${{ steps.sig.outputs.key }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.search.outputs.found }}" = 'true' ]; then
+            echo "**Status**: Artifact hit - build skipped" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Status**: No existing artifact - build required" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     name: Build
@@ -172,15 +209,9 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/build.sh"
           "$GITHUB_WORKSPACE/build.sh" -c on
 
-      - name: Save artifacts to cache
-        uses: actions/cache/save@v4
-        with:
-          path: artifacts/
-          key: firmware-${{ needs.check.outputs.build-key }}
-
       - name: Build summary
         run: |
-          echo "**Cache key**: \`firmware-${{ needs.check.outputs.build-key }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Artifact key**: \`firmware-${{ needs.check.outputs.build-key }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
           find artifacts/ -type f | sort >> "$GITHUB_STEP_SUMMARY"
@@ -189,9 +220,8 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-firmware
+          name: firmware-${{ needs.check.outputs.build-key }}
           path: artifacts/
-          retention-days: 1
 
   release:
     name: Release
@@ -206,7 +236,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: openwrt-firmware
+          name: firmware-${{ needs.check.outputs.build-key }}
           path: artifacts/
 
       - name: Prepare release files

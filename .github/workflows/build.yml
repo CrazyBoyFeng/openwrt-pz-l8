@@ -110,8 +110,17 @@ jobs:
       - name: Compute build signature
         if: steps.gate.outputs.skip != 'true'
         id: sig
+        # Compute build signature that includes BOTH file paths and file contents.
+        # GitHub Actions' built-in hashFiles() only hashes file contents, which
+        # means file renames/moves/deletes don't change the hash - causing stale
+        # cache hits where a renamed file in variants/etc/ doesn't trigger a
+        # rebuild despite the firmware rootfs content changing.
+        #
+        # Using 'git ls-files | sort | xargs sha256sum | sha256sum' includes
+        # file paths (from sha256sum output format) AND content, so any path
+        # change correctly invalidates the cache.
         run: |
-          INPUT_SIG="${{ hashFiles('variants/**', 'patches/**', 'scripts/**', 'build.sh') }}"
+          INPUT_SIG=$(git ls-files 'variants/**' 'patches/**' 'scripts/**' 'build.sh' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
           echo "key=$INPUT_SIG" >> "$GITHUB_OUTPUT"
 
       - name: Search existing artifact

@@ -234,7 +234,7 @@ variants/
     etc/uci-defaults/
       99-init-ap                 # Initial AP mode config (skip if hostname or password set)
     etc/sysctl.d/
-      99-ap-init.conf            # AP bridge mode sysctl: accept upstream IPv6 RA
+      99-ap-ipv6.conf            # AP bridge mode sysctl: accept upstream IPv6 RA
   router/
     build.config                # Router mode: full build config (target, WiFi, firewall, full LuCI)
 patches/

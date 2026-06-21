@@ -238,10 +238,14 @@ jobs:
       - name: Cache ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
-          key: ccache-${{ env.TARGET }}-shared-v16-${{ hashFiles('variants/**', 'patches/**', 'build.sh') }}
+          # OpenWrt sets CCACHE_DIR to $(TOPDIR)/.ccache (rules.mk:354),
+          # which is openwrt/.ccache in our build layout. Caching ~/.ccache
+          # (system ccache default) would be empty - OpenWrt's own ccache
+          # binary uses CCACHE_DIR env var, not the system default.
+          path: openwrt/.ccache
+          key: ccache-${{ env.TARGET }}-shared-v17-${{ hashFiles('variants/**', 'patches/**', 'build.sh') }}
           restore-keys: |
-            ccache-${{ env.TARGET }}-shared-v16-
+            ccache-${{ env.TARGET }}-shared-v17-
 
       - name: Cache dl (downloaded source tarballs)
         uses: actions/cache@v4

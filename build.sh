@@ -243,13 +243,22 @@ setup_ccache() {
         return
     fi
     echo "=== Configuring ccache ==="
-    # In CI, align cache_dir with actions/cache path
-    if [ -n "${GITHUB_ACTIONS:-}" ]; then
-        ccache --set-config=cache_dir=~/.ccache
-    fi
+    # Configure the system ccache (used by build.sh for stats).
+    # OpenWrt's own ccache (staging_dir/host/bin/ccache) reads the same
+    # config file (~/.config/ccache/ccache.conf), so max_size and compression
+    # settings apply to both. The cache_dir setting here only affects system
+    # ccache; OpenWrt overrides it via CCACHE_DIR env var (set in rules.mk:354
+    # to $(TOPDIR)/.ccache = openwrt/.ccache), which is what actions/cache
+    # caches (see .github/workflows/build.yml "Cache ccache" step).
     ccache --set-config=max_size=10G
     ccache --set-config=compression=true
     ccache -z
+
+    # Show effective CCACHE_DIR for debugging
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "CI: ccache cache_dir will be openwrt/.ccache (set by OpenWrt rules.mk)"
+        echo "CI: actions/cache caches openwrt/.ccache path"
+    fi
 }
 
 prepare_openwrt() {
@@ -619,7 +628,18 @@ main() {
     echo ""
     echo "=== ccache stats ==="
     if [ "$USE_CCACHE" = "on" ]; then
-        ccache -s
+        # Use OpenWrt's ccache binary with the correct CCACHE_DIR.
+        # System ccache (used by build.sh setup) has a different cache_dir
+        # and would show 0/0 stats. OpenWrt sets CCACHE_DIR=$(TOPDIR)/.ccache
+        # during build, so we need to replicate that here.
+        OPENWRT_CCACHE="$OPENWRT_DIR/staging_dir/host/bin/ccache"
+        if [ -x "$OPENWRT_CCACHE" ]; then
+            CCACHE_DIR="$OPENWRT_DIR/.ccache" "$OPENWRT_CCACHE" -s
+        else
+            echo "(OpenWrt ccache binary not found at $OPENWRT_CCACHE)"
+            echo "This usually means tools/ccache/compile was skipped."
+            ccache -s
+        fi
     fi
 
     echo ""

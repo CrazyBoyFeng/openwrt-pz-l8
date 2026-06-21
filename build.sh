@@ -272,12 +272,19 @@ prepare_openwrt() {
     else
         echo "=== Cloning OpenWrt ==="
         cd "$PROJECT_ROOT"
-        # Preserve dl/ cache if it exists (restored by CI cache step)
+        # Preserve dl/ and .ccache/ caches if they exist (restored by CI cache step).
+        # prepare_openwrt does 'rm -rf openwrt' below, which would delete these
+        # caches. We back them up to /tmp and restore after clone.
+        # - openwrt/dl: source tarballs (saved by actions/cache "Cache dl" step)
+        # - openwrt/.ccache: compiler cache (saved by actions/cache "Cache ccache" step,
+        #   CCACHE_DIR is set to $(TOPDIR)/.ccache by OpenWrt rules.mk:354)
         [ -d openwrt/dl ] && mv openwrt/dl /tmp/openwrt-dl-backup
+        [ -d openwrt/.ccache ] && mv openwrt/.ccache /tmp/openwrt-ccache-backup
         rm -rf openwrt
         # Full clone (no --depth) so merge-base works for three-dot PR diff
         git clone -b "$OPENWRT_BRANCH" "$OPENWRT_REPO" openwrt
         [ -d /tmp/openwrt-dl-backup ] && mv /tmp/openwrt-dl-backup openwrt/dl
+        [ -d /tmp/openwrt-ccache-backup ] && mv /tmp/openwrt-ccache-backup openwrt/.ccache
         cd openwrt
         OPENWRT_DIR="$(pwd)"
     fi

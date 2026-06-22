@@ -235,25 +235,60 @@ jobs:
             zlib1g-dev file wget curl jq device-tree-compiler \
             ccache libelf-dev libdw-dev libiberty-dev zstd
 
+      - name: Extract OPENWRT_SHA
+        id: owsha
+        # Extract OPENWRT_SHA from build.sh for use in cache keys.
+        # tools and dl caches only depend on OpenWrt commit, not on
+        # PR_21495_SHA, BDF_COMMIT, patches, or build.config.
+        # Using OPENWRT_SHA directly (instead of hashFiles('build.sh'))
+        # avoids unnecessary cache invalidation when PR/BDF commits change.
+        run: |
+          SHA=$(grep '^OPENWRT_SHA=' "$GITHUB_WORKSPACE/build.sh" | cut -d'"' -f2)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "OPENWRT_SHA: $SHA"
+
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           # OpenWrt sets CCACHE_DIR to $(TOPDIR)/.ccache (rules.mk:354),
-          # which is openwrt/.ccache in our build layout. Caching ~/.ccache
-          # (system ccache default) would be empty - OpenWrt's own ccache
-          # binary uses CCACHE_DIR env var, not the system default.
+          # which is openwrt/.ccache in our build layout.
+          # Key includes patches/kernel/** (affects compilation) and
+          # variants/**/build.config (affects which packages are compiled),
+          # but NOT patches/openwrt/** (rootfs-only, doesn't affect compilation)
+          # or variants/**/etc/** (overlay files, don't affect compilation).
           path: openwrt/.ccache
-          key: ccache-${{ env.TARGET }}-shared-v17-${{ hashFiles('variants/**', 'patches/**', 'build.sh') }}
+          key: ccache-${{ env.TARGET }}-shared-v18-${{ hashFiles('patches/kernel/**', 'variants/**/build.config', 'build.sh') }}
           restore-keys: |
-            ccache-${{ env.TARGET }}-shared-v17-
+            ccache-${{ env.TARGET }}-shared-v18-
 
       - name: Cache dl (downloaded source tarballs)
         uses: actions/cache@v4
         with:
+          # dl cache only depends on OpenWrt commit (which source tarballs
+          # to download is determined by OpenWrt's Makefiles, not by our
+          # patches/variants/PR commits).
           path: openwrt/dl
-          key: dl-${{ env.TARGET }}-v1-${{ hashFiles('variants/**', 'patches/**', 'build.sh') }}
+          key: dl-${{ env.TARGET }}-v1-${{ steps.owsha.outputs.sha }}
           restore-keys: |
             dl-${{ env.TARGET }}-v1-
+
+      - name: Cache host tools (staging_dir/host + build_dir/host)
+        uses: actions/cache@v4
+        with:
+          # Cache host tools build artifacts and stamps together:
+          # - staging_dir/host: installed binaries + _installed stamps
+          # - build_dir/host: source + .prepared/.configured/.built stamps
+          # Both are needed: _installed depends on _built, and make checks
+          # .prepared (which includes find_md5 hash of tools/ source mtime).
+          # build.sh normalizes tools/ mtime via 'touch -d 2020-01-01' to make
+          # find_md5 hash deterministic across builds.
+          # Key is OPENWRT_SHA only - tools depend on OpenWrt commit.
+          path: |
+            openwrt/staging_dir/host
+            openwrt/build_dir/host
+          key: host-tools-${{ env.TARGET }}-v1-${{ steps.owsha.outputs.sha }}
+          restore-keys: |
+            host-tools-${{ env.TARGET }}-v1-
 
       - name: Build variants
         run: |

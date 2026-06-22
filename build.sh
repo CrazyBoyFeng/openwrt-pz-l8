@@ -272,19 +272,28 @@ prepare_openwrt() {
     else
         echo "=== Cloning OpenWrt ==="
         cd "$PROJECT_ROOT"
-        # Preserve dl/ and .ccache/ caches if they exist (restored by CI cache step).
-        # prepare_openwrt does 'rm -rf openwrt' below, which would delete these
-        # caches. We back them up to /tmp and restore after clone.
-        # - openwrt/dl: source tarballs (saved by actions/cache "Cache dl" step)
-        # - openwrt/.ccache: compiler cache (saved by actions/cache "Cache ccache" step,
+        # Preserve caches across openwrt clone. prepare_openwrt does 'rm -rf
+        # openwrt' below, which would delete these caches. We back them up to
+        # /tmp and restore after clone.
+        # - openwrt/dl: source tarballs (actions/cache "Cache dl")
+        # - openwrt/.ccache: compiler cache (actions/cache "Cache ccache",
         #   CCACHE_DIR is set to $(TOPDIR)/.ccache by OpenWrt rules.mk:354)
+        # - openwrt/staging_dir/host + openwrt/build_dir/host: host tools
+        #   binaries, source, and stamp files (actions/cache "Cache host tools").
+        #   Both are needed together: _installed stamp (in staging_dir) depends
+        #   on _built stamp (in build_dir). Without build_dir stamps, make
+        #   re-runs prepare→configure→compile→install from scratch.
         [ -d openwrt/dl ] && mv openwrt/dl /tmp/openwrt-dl-backup
         [ -d openwrt/.ccache ] && mv openwrt/.ccache /tmp/openwrt-ccache-backup
+        [ -d openwrt/staging_dir/host ] && mv openwrt/staging_dir/host /tmp/openwrt-staging-host-backup
+        [ -d openwrt/build_dir/host ] && mv openwrt/build_dir/host /tmp/openwrt-build-host-backup
         rm -rf openwrt
         # Full clone (no --depth) so merge-base works for three-dot PR diff
         git clone -b "$OPENWRT_BRANCH" "$OPENWRT_REPO" openwrt
         [ -d /tmp/openwrt-dl-backup ] && mv /tmp/openwrt-dl-backup openwrt/dl
         [ -d /tmp/openwrt-ccache-backup ] && mv /tmp/openwrt-ccache-backup openwrt/.ccache
+        [ -d /tmp/openwrt-staging-host-backup ] && mkdir -p openwrt/staging_dir && mv /tmp/openwrt-staging-host-backup openwrt/staging_dir/host
+        [ -d /tmp/openwrt-build-host-backup ] && mkdir -p openwrt/build_dir && mv /tmp/openwrt-build-host-backup openwrt/build_dir/host
         cd openwrt
         OPENWRT_DIR="$(pwd)"
     fi
@@ -293,9 +302,21 @@ prepare_openwrt() {
     echo "=== Pinning OpenWrt to $OPENWRT_SHA ==="
     git fetch origin "$OPENWRT_SHA"
     git checkout "$OPENWRT_SHA"
+
+    # Normalize mtime of tools/ directory to make find_md5 hash deterministic.
+    # OpenWrt's host-build.mk uses find_md5 (which includes file mtime via
+    # printf '%T@') to compute .prepared stamp filenames. After git clone +
+    # checkout, all files have current mtime → hash differs from cached
+    # build_dir/host stamps → stamps not recognized → tools recompiled from
+    # scratch (~17 min wasted).
+    # Setting mtime to a fixed date makes the hash deterministic across builds,
+    # so cached stamps are recognized and tools/compile is skipped.
+    # Only touch tools/ (not the entire tree) to avoid side effects on other
+    # build components.
+    find tools -type f -exec touch -d '2020-01-01 00:00:00' {} +
 }
 
-merge_pr_and_fix_caldata() {
+merge_pr_21495() {
     echo ""
     echo "=== Applying PR #21495 (ath11k smallbuffers + PZ-L8 WiFi) ==="
 
@@ -311,7 +332,7 @@ merge_pr_and_fix_caldata() {
     #
     # Exclude the ath11k caldata hotplug script from PR apply. PR #21495 adds
     # cmcc,pz-l8 entries to it but in a "bare" form (caldata_extract only,
-    # no MAC patch). We apply our own caldata patch (patches/001-pz-l8-caldata-mac.patch)
+    # no MAC patch). We apply our own caldata patch (patches/openwrt/001-pz-l8-caldata.patch)
     # afterwards which inserts cmcc,pz-l8 case blocks with full MAC patch.
     # This decouples our caldata handling from PR's writing style.
     if ! git diff "origin/$OPENWRT_BRANCH"..."$PR_21495_SHA" \
@@ -337,29 +358,27 @@ merge_pr_and_fix_caldata() {
     fi
 
     echo "=== PR #21495 patches applied ==="
+}
 
-    # Apply our caldata patch on the clean OpenWrt main caldata file (PR was
-    # excluded above). This inserts cmcc,pz-l8 case blocks with full caldata
-    # handling (caldata_extract + label_mac + ath11k_patch_mac +
-    # remove_regdomain + set_macflag) for both 2.4GHz (IPQ5018, offset 0x1000,
-    # MAC +2) and 5GHz (QCN6122, offset 0x26800, MAC +3).
-    #
-    # Using a patch file instead of a script because:
-    #   - patch has explicit context validation (fails fast if caldata file
-    #     structure changed, with .rej file for debugging)
-    #   - patch is more readable and reviewable than awk logic
-    #   - consistent with patches/001-fm25ls01-support.patch in this repo
-    CALDATA_PATCH="$PROJECT_ROOT/patches/002-pz-l8-caldata.patch"
-    echo "=== Applying caldata patch ==="
-    if ! git apply "$CALDATA_PATCH"; then
-        echo "::error::Caldata patch failed to apply."
-        echo "This usually means OpenWrt main's caldata file structure changed."
-        echo "Regenerate patches/002-pz-l8-caldata.patch against the new caldata file:"
-        echo "  1. Edit target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata"
-        echo "  2. Insert cmcc,pz-l8 case blocks (see patch file for expected content)"
-        echo "  3. git diff -- <caldata-file> > patches/002-pz-l8-caldata.patch"
-        exit 1
-    fi
+apply_openwrt_patches() {
+    echo ""
+    echo "=== Applying OpenWrt patches ==="
+    # Patches in patches/openwrt/ modify base-files, hotplug scripts, or other
+    # non-kernel files in the OpenWrt tree. Applied via 'git apply'.
+    # Adding a new openwrt patch: just drop a .patch file in patches/openwrt/,
+    # no build.sh changes needed.
+    for patch in "$PROJECT_ROOT"/patches/openwrt/*.patch; do
+        [ -f "$patch" ] || continue
+        echo "--- Applying $(basename "$patch") ---"
+        if ! git apply "$patch"; then
+            echo "::error::Patch $(basename "$patch") failed to apply."
+            echo "This usually means OpenWrt main's file structure changed."
+            echo "Regenerate $patch against the new file:"
+            echo "  1. Edit the target file in OpenWrt tree"
+            echo "  2. git diff -- <file> > $patch"
+            exit 1
+        fi
+    done
 
     # Sanity check: verify cmcc,pz-l8 has the MAC patch (not just caldata_extract)
     CALDATA=target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
@@ -368,23 +387,25 @@ merge_pr_and_fix_caldata() {
         echo "Expected 2 ath11k_patch_mac calls (2.4GHz + 5GHz), found $(grep -c 'ath11k_patch_mac.*label_mac' "$CALDATA")."
         exit 1
     fi
-    echo "=== Caldata patch applied (2.4GHz + 5GHz) ==="
+    echo "=== OpenWrt patches applied ==="
 }
 
-apply_fm25ls01_patch() {
+apply_kernel_patches() {
     echo ""
-    echo "=== Adding FM25LS01 SPI NAND support (V2 hardware) ==="
+    echo "=== Installing kernel patches ==="
+    # Patches in patches/kernel/ are copied to OpenWrt's kernel patch directory,
+    # where OpenWrt's quilt system applies them during kernel preparation.
+    # These patches modify kernel source code and affect compilation.
+    # Adding a new kernel patch: just drop a .patch file in patches/kernel/,
+    # no build.sh changes needed.
     PATCH_DIR=target/linux/generic/backport-6.12
-    PATCH_SRC="$PROJECT_ROOT/patches/001-fm25ls01-support.patch"
-    PATCH_DST="$PATCH_DIR/440-v6.12-mtd-spinand-add-support-for-FudanMicro-FM25LS01.patch"
-
-    if [ ! -f "$PATCH_SRC" ]; then
-        echo "::error::FM25LS01 patch not found at $PATCH_SRC"
-        exit 1
-    fi
-
-    cp "$PATCH_SRC" "$PATCH_DST"
-    echo "=== FM25LS01 patch installed ==="
+    mkdir -p "$PATCH_DIR"
+    for patch in "$PROJECT_ROOT"/patches/kernel/*.patch; do
+        [ -f "$patch" ] || continue
+        echo "--- Installing $(basename "$patch") ---"
+        cp "$patch" "$PATCH_DIR/$(basename "$patch")"
+    done
+    echo "=== Kernel patches installed ==="
 }
 
 download_bdf_files() {
@@ -502,7 +523,7 @@ build_variants() {
         # CONFIG_PACKAGE_*=y and missed CONFIG_TARGET_*, CONFIG_KERNEL_*, =m,
         # value changes, and multi-target conflicts. Kconfig's own symbol table
         # is the authoritative source of truth.
-        # Note: must run AFTER prepare_openwrt + merge_pr_and_fix_caldata +
+        # Note: must run AFTER prepare_openwrt + merge_pr_21495 +
         # update_feeds, otherwise patch-introduced symbols would false-positive.
         #
         # IMPORTANT: pass these env vars ONLY to the defconfig invocation,
@@ -624,8 +645,9 @@ main() {
     fi
 
     prepare_openwrt
-    merge_pr_and_fix_caldata
-    apply_fm25ls01_patch
+    merge_pr_21495
+    apply_openwrt_patches
+    apply_kernel_patches
     download_bdf_files
     setup_ccache
     update_feeds

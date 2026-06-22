@@ -238,8 +238,10 @@ variants/
   router/
     build.config                # 路由模式：完整构建配置（目标、WiFi、防火墙、完整 LuCI）
 patches/
-  001-fm25ls01-support.patch    # FM25LS01 SPI NAND 支持（V2 硬件）
-  002-pz-l8-caldata.patch        # PZ-L8 ath11k caldata 配置（MAC、regdomain、macflag）
+  kernel/
+    440-v6.12-mtd-spinand-add-support-for-FudanMicro-FM25LS01.patch    # FM25LS01 SPI NAND 支持（V2 硬件，影响编译）
+  openwrt/
+    001-pz-l8-caldata.patch        # PZ-L8 ath11k caldata 配置（仅影响 rootfs）
 .github/
   workflows/build.yml           # CI 构建工作流（调用 build.sh）
   release-notes.md              # 发布说明模板

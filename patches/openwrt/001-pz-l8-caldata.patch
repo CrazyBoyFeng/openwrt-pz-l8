@@ -29,17 +29,15 @@ for 2.4GHz and +3 for 5GHz).
 This patch is applied AFTER PR #21495 (which is applied with --exclude
 for this caldata file), so it runs against a clean OpenWrt main caldata
 file. The insert mode (vs replace mode) decouples this patch from PR
-#21495's caldata writing style - PR can change how it adds cmcc,pz-l8
+#21495's caldata writing style — PR can change how it adds cmcc,pz-l8
 without affecting this patch.
 
 Signed-off-by: CrazyBoyFeng <crazyboyfeng@gmail.com>
 
-diff --git a/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata b/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
-index dbe13c5475..2305d90f02 100644
 --- a/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
 +++ b/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
-@@ -51,6 +51,13 @@ case "$FIRMWARE" in
- 	xiaomi,redmi-ax5400)
+@@ -48,6 +48,13 @@ case "$FIRMWARE" in
+ 	xiaomi,ax6000)
  		caldata_extract "0:art" 0x1000 0x20000
  		;;
 +	cmcc,pz-l8)
@@ -52,7 +50,7 @@ index dbe13c5475..2305d90f02 100644
  	yuncore,ax830|\
  	yuncore,ax850)
  		caldata_extract "0:ART" 0x1000 0x20000
-@@ -98,6 +105,13 @@ case "$FIRMWARE" in
+@@ -95,6 +102,13 @@ case "$FIRMWARE" in
  		ath11k_remove_regdomain
  		ath11k_set_macflag
  		;;

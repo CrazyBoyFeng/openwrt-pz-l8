@@ -52,7 +52,7 @@ PR_21495_SHA="bb1d6cf5472bf0a5e4ebe5f20bc03011122a5734"
 BDF_COMMIT="f7ad5fee1924efdb5d8b2d1bf95bd3867d22e701"
 OPENWRT_REPO="https://github.com/openwrt/openwrt.git"
 OPENWRT_BRANCH="main"
-OPENWRT_SHA="9a4dc0da41965b09b922761e572dff2a590a2319"
+OPENWRT_SHA="a5c5ca0666533a0af027e73f80fbc94f21be54c3"
 
 # ── Defaults ─────────────────────────────────────────────────────────────
 VARIANTS="${DEFAULT_VARIANTS}"

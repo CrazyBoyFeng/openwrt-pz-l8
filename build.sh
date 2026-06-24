@@ -443,7 +443,11 @@ download_toolchain() {
     fi
 
     echo "Downloading $TOOLCHAIN_FILE ..."
-    if curl -LO "${TOOLCHAIN_URL}${TOOLCHAIN_FILE}"; then
+    # Use HTTP/1.1 to avoid HTTP/2 PROTOCOL_ERROR on flaky runner networks.
+    # Retry up to 5 times with 5s delay to ride out transient failures
+    # (downloads.openwrt.org occasionally drops connections mid-stream).
+    if curl -LO --http1.1 --retry 5 --retry-delay 5 --retry-connrefused \
+            "${TOOLCHAIN_URL}${TOOLCHAIN_FILE}"; then
         echo "Extracting $TOOLCHAIN_FILE ..."
         # Extract to a temporary directory to avoid polluting the source tree
         TMPDIR_TOOLCHAIN="$(mktemp -d)"
@@ -592,7 +596,19 @@ build_variants() {
 
         # 4. Build (skip toolchain/compile if precompiled toolchain is installed)
         BUILD_V_START=$(date +%s)
-        PRECOMPILED_TC=$(find staging_dir -maxdepth 1 -type d -name 'toolchain-aarch64_*' 2>/dev/null | head -1)
+        # Detect precompiled toolchain by checking for the actual gcc binary, not
+        # just the directory existence. OpenWrt's make system pre-creates
+        # staging_dir/toolchain-* as an empty stub during prereq, which would
+        # falsely pass a directory-only check and cause toolchain/compile to be
+        # skipped, leading to 'ccache: error: Could not find compiler' later.
+        PRECOMPILED_TC=""
+        for tc_dir in staging_dir/toolchain-aarch64_*; do
+            [ -d "$tc_dir" ] || continue
+            if [ -x "$tc_dir/bin/aarch64-openwrt-linux-musl-gcc" ]; then
+                PRECOMPILED_TC="$tc_dir"
+                break
+            fi
+        done
         if [ -n "$PRECOMPILED_TC" ]; then
             echo "=== Using precompiled toolchain ($(basename "$PRECOMPILED_TC")), skipping toolchain/compile ==="
             # Build host tools (m4, bison, flex, etc.) required by kernel config
